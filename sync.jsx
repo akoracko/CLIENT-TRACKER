@@ -2,10 +2,14 @@
 // Workspace lives at /#ws=ID in the URL. First load creates one and writes the URL.
 // Anyone with the URL sees the same data.
 
-const SYNC_KEY = "sbm_workspace_v3";
-// jsonstorage.net: anonymous JSON storage with CORS support.
-// Workspace ID = "userId/itemId" path returned from the create endpoint.
-const API_BASE = "https://api.jsonstorage.net/v1/json";
+const SYNC_KEY = "sbm_workspace_v4";
+// JSONBin.io: reliable JSON storage. Requires a free API key in config.js.
+const API_BASE = "https://api.jsonbin.io/v3/b";
+const getApiKey = () => (window.SBM_CONFIG && window.SBM_CONFIG.JSONBIN_API_KEY) || "";
+const hasApiKey = () => {
+  const k = getApiKey();
+  return k && k !== "PASTE_KEY_HERE";
+};
 
 const readWsFromUrl = () => {
   const h = window.location.hash || "";
@@ -29,36 +33,49 @@ const saveStoredWs = (id) => {
 };
 
 async function createRemote(initialPayload) {
+  if (!hasApiKey()) throw new Error("MISSING_KEY");
   const res = await fetch(API_BASE, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Master-Key": getApiKey(),
+      "X-Bin-Private": "false",
+    },
     body: JSON.stringify(initialPayload),
   });
-  if (!res.ok) throw new Error("Create failed: " + res.status);
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) throw new Error("INVALID_KEY");
+    throw new Error("Create failed: " + res.status);
+  }
   const data = await res.json();
-  const uri = data && (data.uri || data.URI);
-  if (!uri) throw new Error("Server did not return a URI");
-  // Extract "userId/itemId" from the URI
-  const prefix = API_BASE + "/";
-  const idPath = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri.split("/v1/json/").pop();
-  if (!idPath) throw new Error("Could not parse workspace ID");
-  return idPath;
+  const id = data && data.metadata && data.metadata.id;
+  if (!id) throw new Error("Server did not return a bin ID");
+  return id;
 }
 
 async function fetchRemote(id) {
-  const res = await fetch(`${API_BASE}/${id}`);
+  const headers = hasApiKey() ? { "X-Master-Key": getApiKey() } : {};
+  const res = await fetch(`${API_BASE}/${id}/latest`, { headers });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error("Fetch failed: " + res.status);
-  try { return await res.json(); } catch (e) { return null; }
+  const data = await res.json();
+  return data && data.record;
 }
 
 async function pushRemote(id, payload) {
+  if (!hasApiKey()) throw new Error("MISSING_KEY");
   const res = await fetch(`${API_BASE}/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Master-Key": getApiKey(),
+    },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error("Push failed: " + res.status);
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) throw new Error("INVALID_KEY");
+    throw new Error("Push failed: " + res.status);
+  }
 }
 
 function useSync(localClients, setClients) {
@@ -200,6 +217,7 @@ function useSync(localClients, setClients) {
 
   // Share URL (the current URL — which always contains #ws=)
   const isFileProto = typeof window !== "undefined" && window.location.protocol === "file:";
+  const needsApiKey = !hasApiKey();
   const shareUrl = workspaceId && !isFileProto
     ? `${window.location.origin}${window.location.pathname}${window.location.search}#ws=${workspaceId}`
     : "";
@@ -211,6 +229,7 @@ function useSync(localClients, setClients) {
     showShare,
     bootstrapError,
     isFileProto,
+    needsApiKey,
     retryBootstrap: () => setBootstrapAttempt(a => a + 1),
     dismissShare: () => setShowShare(false),
     openShare: () => setShowShare(true),
@@ -219,7 +238,7 @@ function useSync(localClients, setClients) {
 
 // ---------- Share dialog ----------
 function ShareDialog({ sync }) {
-  const { shareUrl, dismissShare, bootstrapError, isFileProto, retryBootstrap, status } = sync;
+  const { shareUrl, dismissShare, bootstrapError, isFileProto, needsApiKey, retryBootstrap, status } = sync;
   const [copied, setCopied] = React.useState(false);
   const copy = () => {
     navigator.clipboard.writeText(shareUrl).then(() => {
@@ -230,6 +249,7 @@ function ShareDialog({ sync }) {
 
   const hasUrl = !!shareUrl;
   const isConnecting = status.state === "syncing";
+  const isKeyError = bootstrapError === "MISSING_KEY" || bootstrapError === "INVALID_KEY" || needsApiKey;
 
   return (
     <div className="modal-backdrop" onClick={dismissShare}>
@@ -240,12 +260,29 @@ function ShareDialog({ sync }) {
         {isFileProto && (
           <div>
             <p className="modal-sub">
-              You're viewing this file directly from your computer. To get a shareable link, you need to deploy it first (e.g. push to GitHub and import into Vercel). Once it's live on a real URL, this dialog will give you the link to send.
+              You're viewing this file directly from your computer. To get a shareable link, deploy the site to Vercel first.
             </p>
           </div>
         )}
 
-        {!isFileProto && hasUrl && (
+        {!isFileProto && isKeyError && !hasUrl && (
+          <div>
+            <p className="modal-sub">
+              One-time setup: paste a free JSONBin API key into <code className="inline-code">config.js</code> to enable sync.
+            </p>
+            <ol className="setup-steps">
+              <li>Go to <a href="https://jsonbin.io" target="_blank" rel="noopener">jsonbin.io</a> and sign up (Google sign-in is fastest)</li>
+              <li>Click your profile (top right) → <strong>API Keys</strong></li>
+              <li>Copy the <strong>X-Master-Key</strong> value</li>
+              <li>In your GitHub repo, open <strong>config.js</strong> and paste the key, replacing <code className="inline-code">PASTE_KEY_HERE</code></li>
+              <li>Commit &amp; push — Vercel will auto-redeploy in ~30s</li>
+              <li>Refresh this page → share link will appear here</li>
+            </ol>
+            <p className="modal-foot">Free tier includes 10,000 requests/month — way more than you'll need.</p>
+          </div>
+        )}
+
+        {!isFileProto && !isKeyError && hasUrl && (
           <div>
             <p className="modal-sub">
               Send this link to your partner. Anyone with this URL sees the same client list, calendar, and notes — synced live across all devices.
@@ -262,12 +299,12 @@ function ShareDialog({ sync }) {
           </div>
         )}
 
-        {!isFileProto && !hasUrl && (
+        {!isFileProto && !isKeyError && !hasUrl && (
           <div>
             <p className="modal-sub">
               {isConnecting
                 ? "Setting up your workspace — this usually takes a second…"
-                : "Couldn't reach the sync server, so there's no link to share yet. Check your internet connection and try again."}
+                : "Couldn't reach the sync server. Check your internet connection and try again."}
             </p>
             {bootstrapError && !isConnecting && (
               <p className="modal-err">{bootstrapError}</p>
@@ -281,7 +318,7 @@ function ShareDialog({ sync }) {
           </div>
         )}
 
-        {!isFileProto && hasUrl && (
+        {!isFileProto && !isKeyError && hasUrl && (
           <div className="modal-actions" style={{ marginTop: 14 }}>
             <button className="btn" onClick={dismissShare}>Got it</button>
           </div>
