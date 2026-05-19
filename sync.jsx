@@ -2,13 +2,15 @@
 // Workspace lives at /#ws=ID in the URL. First load creates one and writes the URL.
 // Anyone with the URL sees the same data.
 
-const SYNC_KEY = "sbm_workspace_v2";
-const API_BASE = "https://jsonblob.com/api/jsonBlob";
+const SYNC_KEY = "sbm_workspace_v3";
+// jsonstorage.net: anonymous JSON storage with CORS support.
+// Workspace ID = "userId/itemId" path returned from the create endpoint.
+const API_BASE = "https://api.jsonstorage.net/v1/json";
 
 const readWsFromUrl = () => {
   const h = window.location.hash || "";
-  const m = h.match(/ws=([A-Za-z0-9_-]+)/);
-  return m ? m[1] : null;
+  const m = h.match(/ws=([^&\s]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
 };
 
 const writeWsToUrl = (id) => {
@@ -29,27 +31,31 @@ const saveStoredWs = (id) => {
 async function createRemote(initialPayload) {
   const res = await fetch(API_BASE, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(initialPayload),
   });
   if (!res.ok) throw new Error("Create failed: " + res.status);
-  const location = res.headers.get("Location") || "";
-  const id = location.split("/").pop();
-  if (!id) throw new Error("Server did not return ID");
-  return id;
+  const data = await res.json();
+  const uri = data && (data.uri || data.URI);
+  if (!uri) throw new Error("Server did not return a URI");
+  // Extract "userId/itemId" from the URI
+  const prefix = API_BASE + "/";
+  const idPath = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri.split("/v1/json/").pop();
+  if (!idPath) throw new Error("Could not parse workspace ID");
+  return idPath;
 }
 
 async function fetchRemote(id) {
-  const res = await fetch(`${API_BASE}/${id}`, { headers: { "Accept": "application/json" } });
+  const res = await fetch(`${API_BASE}/${id}`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error("Fetch failed: " + res.status);
-  return await res.json();
+  try { return await res.json(); } catch (e) { return null; }
 }
 
 async function pushRemote(id, payload) {
   const res = await fetch(`${API_BASE}/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error("Push failed: " + res.status);
